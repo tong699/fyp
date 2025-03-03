@@ -7,6 +7,8 @@ import random
 import csv
 import os
 from datetime import datetime
+from fastapi import Response
+import json
 
 app = FastAPI()
 
@@ -162,6 +164,20 @@ def update_reward(request: UpdateRewardRequest) -> UpdateRewardResponse:
     # last_user_id = None
 
     return UpdateRewardResponse(status="Q-table updated.")
+
+@app.get("/q_table_debug")
+def get_q_table() -> dict:
+    return {
+        "Q": [
+            {
+                "state": str(key[0]),
+                "action": key[1],
+                "value": value
+            }
+            for key, value in Q.items()
+        ]
+    }
+
 
 # ----------------------------------------------------------------
 # 6. MAIN
