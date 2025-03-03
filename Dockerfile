@@ -5,7 +5,7 @@ COPY requirements.txt /app
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY rl_service.py /app
-COPY actions.csv /app  # If your code references this CSV at runtime
+COPY actions.csv /app
 
 EXPOSE 8000
 
