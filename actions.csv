@@ -1,4 +1,11 @@
-action_id,description
-empathetic_coach,"Respond with empathy, focusing on emotional support."
-challenge_coach,"Propose a doable challenge, focusing on immediate task."
-goal_focused_coach,"Reinforce user's goals, focusing on progress."
+user_intent,action,bot_response
+motivation_request,send_inspiring_quote,"Here's an inspiring quote to kickstart your day: 'Your body can stand almost anything. It's your mind that you have to convince.'"
+motivation_request,share_success_story,"Let me share a success story from someone who overcame challenges to embrace a healthier lifestyle."
+healthy_eating_query,offer_nutrition_tip,"Eating balanced meals is key. Have you tried including more colorful vegetables and lean proteins in your diet?"
+exercise_reminder,send_email_reminder,"I've just sent you an email reminder to go for a 30-minute walk today. Let's get moving!"
+progress_feedback,acknowledge_progress,"Great job on sticking to your healthy habits! Every small step counts—keep up the fantastic work."
+stress_management,suggest_meditation,"A few minutes of meditation can ease stress. Would you like a quick guided meditation exercise?"
+goal_setting,encourage_goal_setting,"Setting achievable goals is important. What healthy habit would you like to focus on this week?"
+general_query,provide_health_info,"I can help with healthy lifestyle tips. What aspect would you like to learn more about—diet, exercise, or overall wellness?"
+sleep_hygiene,suggest_sleep_routine,"A consistent sleep schedule is crucial. Consider setting a fixed bedtime and wake-up time for better rest."
+habit_tracking,recommend_tracking_tool,"Tracking your habits helps you see progress. I recommend trying a habit tracker app to monitor your daily activities."
