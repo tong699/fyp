@@ -246,8 +246,10 @@ def get_q_table() -> dict:
 def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractionResponse:
     global last_state, last_action, last_user_id
 
-    # 1) If we have a previous action and a feedback_label is provided, update the Q-table.
-    if last_state is not None and last_action is not None and request.feedback_label is not None:
+    # Only update Q-table if the incoming request is a feedback type.
+    if (last_state is not None and last_action is not None 
+            and request.user_intent.lower() == "feedback" 
+            and request.feedback_label is not None):
         if request.feedback_label.lower() == "positive":
             reward = 1.0
         elif request.feedback_label.lower() == "negative":
@@ -255,7 +257,7 @@ def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractio
         else:
             reward = 0.0
 
-        # Use an empty string as last_message for state computation.
+        # Use an empty string for last_message (or adjust if needed)
         next_state = make_state("feedback", "")
         update_q_learning(last_state, last_action, reward, next_state)
         log_interaction(
@@ -266,18 +268,17 @@ def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractio
             new_state=next_state
         )
 
-    # 2) Select a new action based on the provided user_intent.
+    # Now, regardless of feedback, select a new action based on the provided user_intent.
     new_state = make_state(request.user_intent, "")
     chosen_action = choose_action(new_state, intent=request.user_intent)
 
     # Update global tracking variables for subsequent updates.
     last_state = new_state
     last_action = chosen_action["action"]
-    # If you don't receive user_id here, you can leave last_user_id unchanged or set to None.
-    last_user_id = None
+    last_user_id = None  # or keep unchanged if you prefer
 
     return FlowiseInteractionResponse(
-        status="Q-table updated and action selected.",
+        status="Action selected.",
         selected_action=chosen_action
     )
 
