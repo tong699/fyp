@@ -195,6 +195,58 @@ def get_q_table() -> dict:
         ]
     }
 
+# NEW: A single endpoint to handle both feedback + next action request
+@app.post("/flowise_interaction", response_model=FlowiseInteractionResponse)
+def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractionResponse:
+    """
+    This new endpoint can be called at the end of your Flowise chatflow.
+    1) If there's a previous action, it updates the Q-table with the feedback (if any).
+    2) Selects a new action based on the current user_intent and last_message.
+    3) Returns the newly chosen action in the response.
+    """
+    global last_state, last_action, last_user_id
+
+    # 1) If we have a previous action and there's some feedback_label, update the Q-table
+    if last_state is not None and last_action is not None and request.feedback_label is not None:
+        # Convert feedback_label ("positive"/"negative") into numeric reward
+        if request.feedback_label.lower() == "positive":
+            reward = 1.0
+            feedback_type = "positive"
+        elif request.feedback_label.lower() == "negative":
+            reward = -1.0
+            feedback_type = "negative"
+        else:
+            reward = 0.0
+            feedback_type = "neutral"
+
+        # Construct "next_state" to reflect user feedback
+        next_state = make_state("feedback", request.last_message)
+
+        # Update Q-learning
+        update_q_learning(last_state, last_action, reward, next_state)
+        log_interaction(
+            user_id=last_user_id,
+            state=last_state,
+            action=last_action,
+            reward=reward,
+            new_state=next_state
+        )
+
+    # 2) Now select a new action based on the user's newly classified intent + last_message
+    new_state = make_state(request.user_intent, request.last_message)
+    chosen_action = choose_action(new_state)
+
+    # Update global tracking
+    last_state = new_state
+    last_action = chosen_action
+    last_user_id = request.user_id
+
+    return FlowiseInteractionResponse(
+        status="Q-table updated and action selected.",
+        selected_action=chosen_action
+    )
+
+
 # ----------------------------------------------------------------
 # 6. MAIN
 # ----------------------------------------------------------------
