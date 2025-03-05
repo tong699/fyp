@@ -7,8 +7,19 @@ import random
 import csv
 import os
 from datetime import datetime
+from pymongo import MongoClient
 
 app = FastAPI()
+
+# ----------------------------------------------------------------
+# MongoDB Setup
+# ----------------------------------------------------------------
+# Replace with your actual MongoDB Atlas connection string
+MONGO_CONNECTION_STRING = "mongodb+srv://cmtong123:20020430@cluster0.d6vff.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+client = MongoClient(MONGO_CONNECTION_STRING)
+db = client["rl_database"]  # use your preferred database name
+logs_collection = db["action_logs"]
+q_table_collection = db["q_table"]
 
 # ----------------------------------------------------------------
 # 1. LOAD ACTIONS FROM CSV
@@ -36,27 +47,50 @@ def load_actions_from_csv(csv_file_path="actions.csv"):
 load_actions_from_csv()  # Call at startup
 
 # ----------------------------------------------------------------
-# 2. LOGGING TO CSV (optional)
+# 2. LOGGING TO MONGODB
 # ----------------------------------------------------------------
-LOG_FILE = "action_log.csv"
-
-# Initialize CSV log with header if it doesn't exist
-if not os.path.exists(LOG_FILE):
-    with open(LOG_FILE, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["timestamp", "user_id", "state", "action", "reward", "new_state"])
-
 def log_interaction(user_id, state, action, reward, new_state):
-    with open(LOG_FILE, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow([
-            datetime.now().isoformat(),
-            user_id,
-            str(state),
-            action,
-            reward,
-            str(new_state)
-        ])
+    log_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "user_id": user_id,
+        "state": str(state),
+        "action": action,
+        "reward": reward,
+        "new_state": str(new_state)
+    }
+    logs_collection.insert_one(log_entry)
+
+# ----------------------------------------------------------------
+# 2B. Q-TABLE PERSISTENCE FUNCTIONS
+# ----------------------------------------------------------------
+def save_q_table_to_mongo():
+    """
+    Save the current Q-table to MongoDB.
+    This function clears the previous Q-table entries and inserts the updated ones.
+    """
+    q_table_collection.delete_many({})  # Remove old Q-table entries
+    docs = []
+    for (state, action), value in Q.items():
+        docs.append({
+            "state": str(state),  # Convert tuple to string
+            "action": action,
+            "value": value
+        })
+    if docs:
+        q_table_collection.insert_many(docs)
+
+def load_q_table_from_mongo():
+    """
+    Load the Q-table from MongoDB and update the global Q dictionary.
+    """
+    global Q
+    Q.clear()
+    for doc in q_table_collection.find():
+        # Here we store state as a string; in a production system, you'd parse it safely
+        state = eval(doc["state"])  # Caution: eval can be unsafe. Use a proper parser in production.
+        action = doc["action"]
+        value = doc["value"]
+        Q[(state, action)] = value
 
 # ----------------------------------------------------------------
 # 3. DATA MODELS
@@ -155,6 +189,8 @@ def update_q_learning(state: tuple, action: str, reward: float,
     best_future_val = max(future_qs) if future_qs else 0.0
     new_value = old_value + alpha * (reward + gamma * best_future_val - old_value)
     set_Q_value(state, action, new_value)
+    # Save Q-table to MongoDB after each update
+    save_q_table_to_mongo()
 
 # ----------------------------------------------------------------
 # 5. ENDPOINTS
@@ -183,7 +219,7 @@ def update_reward(request: UpdateRewardRequest) -> UpdateRewardResponse:
     next_state = make_state("feedback", request.new_user_message or "")
     update_q_learning(last_state, last_action, request.reward, next_state)
 
-    # Log interaction for analysis
+    # Log interaction in MongoDB
     log_interaction(
         user_id=last_user_id,
         state=last_state,
