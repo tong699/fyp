@@ -82,6 +82,18 @@ class UpdateRewardRequest(BaseModel):
 class UpdateRewardResponse(BaseModel):
     status: str
 
+class FlowiseInteractionRequest(BaseModel):
+    user_id: Optional[str] = "unknown"
+    user_intent: str
+    feedback_label: Optional[str] = None  # e.g., "positive", "negative", or None if no feedback
+    last_message: str
+    conversation_history: List[str]
+    user_profile: Dict[str, str]
+
+class FlowiseInteractionResponse(BaseModel):
+    status: str
+    selected_action: dict  # Contains both "action" and "bot_response"
+
 # ----------------------------------------------------------------
 # 4. Q-LEARNING LOGIC
 # ----------------------------------------------------------------
@@ -130,7 +142,7 @@ def choose_action(state: tuple, intent: str, epsilon=0.1) -> dict:
         if q_val > best_q:
             best_q = q_val
             best_action = act
-    # If no action has a positive Q-value, fallback to a random choice
+    # Fallback to random choice if no best action is found
     if best_action is None:
         best_action = random.choice(available_actions)
     return best_action
@@ -195,34 +207,23 @@ def get_q_table() -> dict:
         ]
     }
 
-# NEW: A single endpoint to handle both feedback + next action request
+# NEW: A single endpoint to handle both feedback and next action request from Flowise
 @app.post("/flowise_interaction", response_model=FlowiseInteractionResponse)
 def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractionResponse:
-    """
-    This new endpoint can be called at the end of your Flowise chatflow.
-    1) If there's a previous action, it updates the Q-table with the feedback (if any).
-    2) Selects a new action based on the current user_intent and last_message.
-    3) Returns the newly chosen action in the response.
-    """
     global last_state, last_action, last_user_id
 
-    # 1) If we have a previous action and there's some feedback_label, update the Q-table
+    # 1) If we have a previous action and a feedback_label is provided, update the Q-table
     if last_state is not None and last_action is not None and request.feedback_label is not None:
-        # Convert feedback_label ("positive"/"negative") into numeric reward
+        # Map feedback_label to a numeric reward
         if request.feedback_label.lower() == "positive":
             reward = 1.0
-            feedback_type = "positive"
         elif request.feedback_label.lower() == "negative":
             reward = -1.0
-            feedback_type = "negative"
         else:
             reward = 0.0
-            feedback_type = "neutral"
 
-        # Construct "next_state" to reflect user feedback
+        # Construct "next_state" based on feedback
         next_state = make_state("feedback", request.last_message)
-
-        # Update Q-learning
         update_q_learning(last_state, last_action, reward, next_state)
         log_interaction(
             user_id=last_user_id,
@@ -232,20 +233,19 @@ def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractio
             new_state=next_state
         )
 
-    # 2) Now select a new action based on the user's newly classified intent + last_message
+    # 2) Select a new action based on the current intent and last message
     new_state = make_state(request.user_intent, request.last_message)
-    chosen_action = choose_action(new_state)
+    chosen_action = choose_action(new_state, intent=request.user_intent)
 
-    # Update global tracking
+    # Update global tracking variables for subsequent updates
     last_state = new_state
-    last_action = chosen_action
+    last_action = chosen_action["action"]
     last_user_id = request.user_id
 
     return FlowiseInteractionResponse(
         status="Q-table updated and action selected.",
         selected_action=chosen_action
     )
-
 
 # ----------------------------------------------------------------
 # 6. MAIN
