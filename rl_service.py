@@ -242,13 +242,14 @@ def get_q_table() -> dict:
 
 # NEW: A simplified endpoint to handle both feedback and next action from Flowise.
 # This endpoint now expects only 'user_intent' and 'feedback_label'.
+# It will update the Q-table (rewarding the last action) if the user_intent indicates feedback or followup.
 @app.post("/flowise_interaction", response_model=FlowiseInteractionResponse)
 def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractionResponse:
     global last_state, last_action, last_user_id
 
-    # Only update Q-table if the incoming request is a feedback type.
+    # Update Q-table if this request is feedback or a follow-up (positive or negative)
     if (last_state is not None and last_action is not None 
-            and request.user_intent.lower() == "feedback" 
+            and request.user_intent.lower() in ["feedback", "followup_positive", "followup_negative"] 
             and request.feedback_label is not None):
         if request.feedback_label.lower() == "positive":
             reward = 1.0
@@ -257,7 +258,7 @@ def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractio
         else:
             reward = 0.0
 
-        # Use an empty string for last_message (or adjust if needed)
+        # Use an empty string for last_message for state computation
         next_state = make_state("feedback", "")
         update_q_learning(last_state, last_action, reward, next_state)
         log_interaction(
@@ -268,7 +269,7 @@ def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractio
             new_state=next_state
         )
 
-    # Now, regardless of feedback, select a new action based on the provided user_intent.
+    # Select a new action based on the provided user_intent.
     new_state = make_state(request.user_intent, "")
     chosen_action = choose_action(new_state, intent=request.user_intent)
 
