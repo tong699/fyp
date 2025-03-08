@@ -252,10 +252,16 @@ def get_q_table() -> dict:
 def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractionResponse:
     global last_state, last_action, last_user_id
 
-    # Update Q-table if this request is feedback or a follow-up (positive or negative)
-    if (last_state is not None and last_action is not None 
-            and request.user_intent.lower() in ["feedback", "followup_positive", "followup_negative"] 
-            and request.feedback_label is not None):
+    # Update Q-table if we have a valid last_state/last_action, plus
+    # user_intent is 'feedback' or begins with 'followup_', and we have a feedback_label
+    if (last_state is not None 
+        and last_action is not None
+        and request.feedback_label is not None
+        and (
+            request.user_intent.lower() == "feedback" 
+            or request.user_intent.lower().startswith("followup_")
+        )
+    ):
         if request.feedback_label.lower() == "positive":
             reward = 1.0
         elif request.feedback_label.lower() == "negative":
@@ -263,7 +269,7 @@ def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractio
         else:
             reward = 0.0
 
-        # Use an empty string for last_message for state computation
+        # Use an empty string for last_message here (or adapt as needed)
         next_state = make_state("feedback", "")
         update_q_learning(last_state, last_action, reward, next_state)
         log_interaction(
@@ -274,19 +280,21 @@ def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractio
             new_state=next_state
         )
 
-    # Select a new action based on the provided user_intent.
+    # Now select a new action using the fresh user_intent
     new_state = make_state(request.user_intent, "")
     chosen_action = choose_action(new_state, intent=request.user_intent)
 
-    # Update global tracking variables for subsequent updates.
+    # Update the global variables for subsequent calls
     last_state = new_state
     last_action = chosen_action["action"]
-    last_user_id = None  # or keep unchanged if you prefer
+    # You can decide whether to keep or reset last_user_id here
+    last_user_id = None
 
     return FlowiseInteractionResponse(
         status="Action selected.",
         selected_action=chosen_action
     )
+
 
 # ----------------------------------------------------------------
 # 6. MAIN
