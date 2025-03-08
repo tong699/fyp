@@ -1,11 +1,9 @@
-# rl_service.py
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import random
 import csv
-import os
 from datetime import datetime
 from pymongo import MongoClient
 
@@ -14,18 +12,15 @@ app = FastAPI()
 # ----------------------------------------------------------------
 # MongoDB Setup
 # ----------------------------------------------------------------
-# Replace with your actual MongoDB Atlas connection string
 MONGO_CONNECTION_STRING = "mongodb+srv://cmtong123:20020430@cluster0.d6vff.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 client = MongoClient(MONGO_CONNECTION_STRING)
-db = client["rl_database"]  # use your preferred database name
+db = client["rl_database"]
 logs_collection = db["action_logs"]
 q_table_collection = db["q_table"]
 
 # ----------------------------------------------------------------
-# 1. LOAD ACTIONS FROM CSV
+# ACTIONS CSV LOADING
 # ----------------------------------------------------------------
-# Global dictionary: keys are user_intent, values are lists of dictionaries
-# Each dictionary contains an "action" and "bot_response"
 ACTIONS_BY_INTENT = {}
 
 def load_actions_from_csv(csv_file_path="actions.csv"):
@@ -37,17 +32,13 @@ def load_actions_from_csv(csv_file_path="actions.csv"):
             intent = row["user_intent"]
             action = row["action"]
             bot_response = row["bot_response"]
-            if intent not in ACTIONS_BY_INTENT:
-                ACTIONS_BY_INTENT[intent] = []
-            ACTIONS_BY_INTENT[intent].append({
+            ACTIONS_BY_INTENT.setdefault(intent, []).append({
                 "action": action,
                 "bot_response": bot_response
             })
 
-load_actions_from_csv()  # Call at startup
-
 # ----------------------------------------------------------------
-# 2. LOGGING TO MONGODB
+# LOGGING AND Q-TABLE MANAGEMENT
 # ----------------------------------------------------------------
 def log_interaction(user_id, state, action, reward, new_state):
     log_entry = {
@@ -60,40 +51,21 @@ def log_interaction(user_id, state, action, reward, new_state):
     }
     logs_collection.insert_one(log_entry)
 
-# ----------------------------------------------------------------
-# 2B. Q-TABLE PERSISTENCE FUNCTIONS
-# ----------------------------------------------------------------
 def save_q_table_to_mongo():
-    """
-    Save the current Q-table to MongoDB.
-    This function clears the previous Q-table entries and inserts the updated ones.
-    """
-    q_table_collection.delete_many({})  # Remove old Q-table entries
-    docs = []
-    for (state, action), value in Q.items():
-        docs.append({
-            "state": str(state),  # Convert tuple to string
-            "action": action,
-            "value": value
-        })
+    q_table_collection.delete_many({})
+    docs = [{"state": str(state), "action": action, "value": value} for (state, action), value in Q.items()]
     if docs:
         q_table_collection.insert_many(docs)
 
 def load_q_table_from_mongo():
-    """
-    Load the Q-table from MongoDB and update the global Q dictionary.
-    """
     global Q
     Q.clear()
     for doc in q_table_collection.find():
-        # Here we store state as a string; in production, parse it safely
-        state = eval(doc["state"])  # Caution: eval can be unsafe in production.
-        action = doc["action"]
-        value = doc["value"]
-        Q[(state, action)] = value
+        state = eval(doc["state"])
+        Q[(state, doc["action"])] = doc["value"]
 
 # ----------------------------------------------------------------
-# 3. DATA MODELS
+# DATA MODELS
 # ----------------------------------------------------------------
 class SelectActionRequest(BaseModel):
     user_id: Optional[str] = "unknown"
@@ -116,17 +88,16 @@ class UpdateRewardRequest(BaseModel):
 class UpdateRewardResponse(BaseModel):
     status: str
 
-# NEW: Simplified Flowise Interaction Request
 class FlowiseInteractionRequest(BaseModel):
     user_intent: str
-    feedback_label: Optional[str] = None  # "positive", "negative", or None
+    feedback_label: Optional[str] = None
 
 class FlowiseInteractionResponse(BaseModel):
     status: str
-    selected_action: dict  # Contains "action" and "bot_response"
+    selected_action: dict
 
 # ----------------------------------------------------------------
-# 4. Q-LEARNING LOGIC
+# Q-LEARNING LOGIC
 # ----------------------------------------------------------------
 Q = {}
 last_state = None
@@ -134,16 +105,11 @@ last_action = None
 last_user_id = None
 
 def map_intent_to_number(intent: str) -> int:
-    mapping = {"motivation_request": 0, "feedback": 1, "general_query": 2}
-    return mapping.get(intent, 99)
+    return {"motivation_request": 0, "feedback": 1, "general_query": 2}.get(intent, 99)
 
 def get_sentiment_score(message: str) -> float:
     text = message.lower()
-    if "unmotivated" in text or "bad" in text or "frustrated" in text:
-        return -1.0
-    elif "good" in text or "great" in text or "thanks" in text:
-        return 1.0
-    return 0.0
+    return -1.0 if any(w in text for w in ["unmotivated", "bad", "frustrated"]) else 1.0 if any(w in text for w in ["good", "great", "thanks"]) else 0.0
 
 def make_state(user_intent: str, last_message: str) -> tuple:
     return (map_intent_to_number(user_intent), get_sentiment_score(last_message))
@@ -155,136 +121,43 @@ def set_Q_value(state: tuple, action: str, value: float):
     Q[(state, action)] = value
 
 def choose_action(state: tuple, intent: str, epsilon=0.1) -> dict:
-    # Filter available actions by the current user_intent
     available_actions = ACTIONS_BY_INTENT.get(intent, [])
-    if not available_actions:
-        return {"action": "NO_ACTIONS_FOR_INTENT", "bot_response": "No action defined for this intent."}
-    
-    # Epsilon-greedy: explore with probability epsilon
-    if random.random() < epsilon:
-        return random.choice(available_actions)
-    
-    # Otherwise, select the action with highest Q-value
-    best_action = None
-    best_q = float("-inf")
-    for act in available_actions:
-        a = act["action"]
-        q_val = get_Q_value(state, a)
-        if q_val > best_q:
-            best_q = q_val
-            best_action = act
-    # Fallback to random choice if no best action is found
-    if best_action is None:
-        best_action = random.choice(available_actions)
-    return best_action
+    if random.random() < epsilon or not available_actions:
+        return random.choice(available_actions) if available_actions else {"action": "NO_ACTION", "bot_response": "No actions."}
+    return max(available_actions, key=lambda act: get_Q_value(state, act["action"]))
 
-def update_q_learning(state: tuple, action: str, reward: float,
-                      next_state: tuple, alpha=0.1, gamma=0.9):
-    old_value = get_Q_value(state, action)
-    # For updating Q, consider all actions regardless of intent
-    future_qs = [get_Q_value(next_state, a["action"]) for acts in ACTIONS_BY_INTENT.values() for a in acts]
-    best_future_val = max(future_qs) if future_qs else 0.0
-    new_value = old_value + alpha * (reward + gamma * best_future_val - old_value)
-    set_Q_value(state, action, new_value)
-    # Save Q-table to MongoDB after each update
+def update_q_learning(state, action, reward, next_state, alpha=0.1, gamma=0.9):
+    best_future_val = max([get_Q_value(next_state, a["action"]) for acts in ACTIONS_BY_INTENT.values() for a in acts], default=0.0)
+    updated_q = get_Q_value(state, action) + alpha * (reward + gamma * best_future_val - get_Q_value(state, action))
+    set_Q_value(state, action, updated_q)
     save_q_table_to_mongo()
 
 # ----------------------------------------------------------------
-# 5. ENDPOINTS
+# ENDPOINTS
 # ----------------------------------------------------------------
+@app.on_event("startup")
+def startup_event():
+    load_actions_from_csv()
+    load_q_table_from_mongo()
+
 @app.post("/select_action", response_model=SelectActionResponse)
-def select_action(request: SelectActionRequest) -> SelectActionResponse:
+def select_action(request: SelectActionRequest):
     global last_state, last_action, last_user_id
     state = make_state(request.user_intent, request.last_message)
-    chosen = choose_action(state, intent=request.user_intent)
-    action = chosen["action"]
-    bot_response = chosen["bot_response"]
-
-    last_state = state
-    last_action = action
-    last_user_id = request.user_id
-
-    return SelectActionResponse(action=action, bot_response=bot_response)
+    chosen = choose_action(state, request.user_intent)
+    last_state, last_action, last_user_id = state, chosen["action"], request.user_id
+    return SelectActionResponse(**chosen)
 
 @app.post("/update_reward", response_model=UpdateRewardResponse)
-def update_reward(request: UpdateRewardRequest) -> UpdateRewardResponse:
-    global last_state, last_action, last_user_id
-    if last_state is None or last_action is None:
-        return UpdateRewardResponse(status="No previous state/action to update.")
+def update_reward(request: UpdateRewardRequest):
+    global last_state, last_action
+    if last_state and last_action:
+        next_state = make_state("feedback", request.new_user_message or "")
+        update_q_learning(last_state, last_action, request.reward, next_state)
+        log_interaction(request.user_id, last_state, last_action, request.reward, next_state)
+        return UpdateRewardResponse(status="Updated")
+    return UpdateRewardResponse(status="No update")
 
-    # For reward updates, we use "feedback" as intent and new_user_message for sentiment
-    next_state = make_state("feedback", request.new_user_message or "")
-    update_q_learning(last_state, last_action, request.reward, next_state)
-
-    # Log interaction in MongoDB
-    log_interaction(
-        user_id=last_user_id,
-        state=last_state,
-        action=last_action,
-        reward=request.reward,
-        new_state=next_state
-    )
-
-    return UpdateRewardResponse(status="Q-table updated.")
-
-@app.get("/q_table_debug")
-def get_q_table() -> dict:
-    return {
-        "Q": [
-            {
-                "state": str(key[0]),
-                "action": key[1],
-                "value": value
-            }
-            for key, value in Q.items()
-        ]
-    }
-
-# NEW: A simplified endpoint to handle both feedback and next action from Flowise.
-# This endpoint now expects only 'user_intent' and 'feedback_label'.
-# It will update the Q-table (rewarding the last action) if the user_intent indicates feedback or followup.
-@app.post("/flowise_interaction", response_model=FlowiseInteractionResponse)
-def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractionResponse:
-    global last_state, last_action, last_user_id
-
-    # Update Q-table if this request is feedback or a follow-up (positive or negative)
-    if (last_state is not None and last_action is not None 
-            and request.user_intent.lower() in ["feedback", "followup_positive", "followup_negative"] 
-            and request.feedback_label is not None):
-        if request.feedback_label.lower() == "positive":
-            reward = 1.0
-        elif request.feedback_label.lower() == "negative":
-            reward = -1.0
-        else:
-            reward = 0.0
-
-        # Use an empty string for last_message for state computation
-        next_state = make_state("feedback", "")
-        update_q_learning(last_state, last_action, reward, next_state)
-        log_interaction(
-            user_id=last_user_id,
-            state=last_state,
-            action=last_action,
-            reward=reward,
-            new_state=next_state
-        )
-
-    # Select a new action based on the provided user_intent.
-    new_state = make_state(request.user_intent, "")
-    chosen_action = choose_action(new_state, intent=request.user_intent)
-
-    # Update global tracking variables for subsequent updates.
-    last_state = new_state
-    last_action = chosen_action["action"]
-    last_user_id = None  # or keep unchanged if you prefer
-
-    return FlowiseInteractionResponse(
-        status="Action selected.",
-        selected_action=chosen_action
-    )
-
-# ----------------------------------------------------------------
-# 6. MAIN
-# ----------------------------------------------------------------
+# MAIN
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
