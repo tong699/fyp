@@ -77,10 +77,11 @@ def load_q_table_from_mongo():
     global Q_by_session
     Q_by_session.clear()
     for doc in q_table_collection.find():
-        session_id = doc["session_id"]
-        state = doc["state"]
-        action = doc["action"]
-        value = doc["value"]
+        # Use a default session_id if not provided
+        session_id = doc.get("session_id", "unknown")
+        state = doc.get("state", "")
+        action = doc.get("action", "")
+        value = doc.get("value", 0.0)
         if session_id not in Q_by_session:
             Q_by_session[session_id] = {}
         Q_by_session[session_id][(state, action)] = value
