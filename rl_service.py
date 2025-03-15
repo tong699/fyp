@@ -239,7 +239,7 @@ def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractio
 
     # If feedback is provided (or followup) and there is a previous interaction, update Q-table.
     if (session_id in last_interaction_by_session and request.feedback_label is not None and 
-        (request.user_intent.lower() == "feedback" or request.user_intent.lower().startswith("followup_"))):
+        (request.user_intent.lower().startswith("_feedback"))):
         if request.feedback_label.lower() == "positive":
             reward = 1.0
         elif request.feedback_label.lower() == "negative":
