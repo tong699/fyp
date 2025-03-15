@@ -165,6 +165,14 @@ def update_q_learning(session_id: str, state: str, action: str, reward: float,
     old_value = get_Q_value(q_table, state, action)
     # Try to get future actions for the next state; if none, iterate over all available actions.
     actions_for_next_state = ACTIONS_BY_INTENT.get(next_state, [])
+
+    # Prevent terminal states from being updated
+    if state in ["intent_ended"]:
+        return
+    # Handle clarification flow
+    if state == "needs_clarification":
+        gamma = 0.6  # Reduce future value weight for clarification sequences
+
     if actions_for_next_state:
         future_qs = [get_Q_value(q_table, next_state, a["action"]) for a in actions_for_next_state]
     else:
@@ -238,14 +246,19 @@ def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractio
     session_id = request.session_id
 
     # If feedback is provided (or followup) and there is a previous interaction, update Q-table.
-    if (session_id in last_interaction_by_session and request.feedback_label is not None and 
-        (request.user_intent.lower().startswith("_feedback"))):
-        if request.feedback_label.lower() == "positive":
+    if (session_id in last_interaction_by_session and 
+    request.user_intent in ["positive_feedback", "needs_clarification", "intent_ended"]):
+        if request.user_intent == "positive_feedback":
             reward = 1.0
-        elif request.feedback_label.lower() == "negative":
+        elif request.user_intent == "needs_clarification":
+            reward = -0.5  # Encourage clarity
+        elif request.feedback_label == "positive":
+            reward = 1.0
+        elif request.feedback_label == "negative":
             reward = -1.0
         else:
             reward = 0.0
+
 
         previous = last_interaction_by_session[session_id]
         state = previous["state"]
