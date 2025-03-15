@@ -1,4 +1,3 @@
-# rl_service.py
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -22,8 +21,6 @@ q_table_collection = db["q_table"]
 # ----------------------------------------------------------------
 # 1. LOAD ACTIONS FROM CSV
 # ----------------------------------------------------------------
-# Global dictionary: keys are user_intent, values are lists of dictionaries.
-# Each dictionary contains an "action" and "bot_response" (short system prompt).
 ACTIONS_BY_INTENT = {}
 
 def load_actions_from_csv(csv_file_path="actions.csv"):
@@ -47,10 +44,10 @@ load_actions_from_csv()  # Call at startup
 # ----------------------------------------------------------------
 # 2. LOGGING TO MONGODB
 # ----------------------------------------------------------------
-def log_interaction(user_id, state, action, reward, new_state):
+def log_interaction(session_id, state, action, reward, new_state):
     log_entry = {
         "timestamp": datetime.now().isoformat(),
-        "user_id": user_id,
+        "session_id": session_id,
         "state": str(state),
         "action": action,
         "reward": reward,
@@ -59,13 +56,16 @@ def log_interaction(user_id, state, action, reward, new_state):
     logs_collection.insert_one(log_entry)
 
 # ----------------------------------------------------------------
-# 2B. Q-TABLE PERSISTENCE FUNCTIONS
+# 2B. Q-TABLE PERSISTENCE FUNCTIONS (per session)
 # ----------------------------------------------------------------
-def save_q_table_to_mongo():
-    q_table_collection.delete_many({})
+def save_q_table_to_mongo(session_id: str):
+    q_table = Q_by_session.get(session_id, {})
+    # Remove previous entries for this session
+    q_table_collection.delete_many({"session_id": session_id})
     docs = []
-    for (state, action), value in Q.items():
+    for (state, action), value in q_table.items():
         docs.append({
+            "session_id": session_id,
             "state": str(state),
             "action": action,
             "value": value
@@ -74,19 +74,23 @@ def save_q_table_to_mongo():
         q_table_collection.insert_many(docs)
 
 def load_q_table_from_mongo():
-    global Q
-    Q.clear()
+    global Q_by_session
+    Q_by_session.clear()
     for doc in q_table_collection.find():
+        session_id = doc["session_id"]
         state = doc["state"]
         action = doc["action"]
         value = doc["value"]
-        Q[(state, action)] = value
+        if session_id not in Q_by_session:
+            Q_by_session[session_id] = {}
+        Q_by_session[session_id][(state, action)] = value
 
 # ----------------------------------------------------------------
 # 3. DATA MODELS
 # ----------------------------------------------------------------
 class SelectActionRequest(BaseModel):
-    user_id: Optional[str] = "unknown"
+    # For backward compatibility, you might use user_id as session_id.
+    session_id: Optional[str] = "unknown"
     user_intent: str
     last_message: str
     conversation_history: List[str]
@@ -97,7 +101,7 @@ class SelectActionResponse(BaseModel):
     bot_response: str
 
 class UpdateRewardRequest(BaseModel):
-    user_id: Optional[str] = "unknown"
+    session_id: Optional[str] = "unknown"
     action: str
     reward: float
     feedback_type: str
@@ -117,30 +121,35 @@ class FlowiseInteractionResponse(BaseModel):
     selected_prompt: str  # Returns the short system prompt
 
 # ----------------------------------------------------------------
-# 4. Q-LEARNING LOGIC
+# 4. Q-LEARNING LOGIC (per session)
 # ----------------------------------------------------------------
-Q = {}
-last_state = None
-last_action = None
-last_user_id = None
+# Global dictionaries for per-session Q-tables and last interaction.
+Q_by_session: Dict[str, Dict] = {}
+last_interaction_by_session: Dict[str, Dict] = {}
 
-def get_Q_value(state: str, action: str) -> float:
-    return Q.get((state, action), 0.0)
+def get_q_table(session_id: str) -> dict:
+    if session_id not in Q_by_session:
+        Q_by_session[session_id] = {}
+    return Q_by_session[session_id]
 
-def set_Q_value(state: str, action: str, value: float):
-    Q[(state, action)] = value
+def get_Q_value(q_table: dict, state: str, action: str) -> float:
+    return q_table.get((state, action), 0.0)
 
-def choose_action(state: str, intent: str, epsilon=0.1) -> dict:
+def set_Q_value(q_table: dict, state: str, action: str, value: float):
+    q_table[(state, action)] = value
+
+def choose_action(session_id: str, state: str, intent: str, epsilon=0.1) -> dict:
     available_actions = ACTIONS_BY_INTENT.get(intent, [])
     if not available_actions:
         return {"action": "NO_ACTIONS_FOR_INTENT", "bot_response": "Hmm, I'm not sure."}
+    q_table = get_q_table(session_id)
     if random.random() < epsilon:
         return random.choice(available_actions)
     best_action = None
     best_q = float("-inf")
     for act in available_actions:
         a = act["action"]
-        q_val = get_Q_value(state, a)
+        q_val = get_Q_value(q_table, state, a)
         if q_val > best_q:
             best_q = q_val
             best_action = act
@@ -148,14 +157,16 @@ def choose_action(state: str, intent: str, epsilon=0.1) -> dict:
         best_action = random.choice(available_actions)
     return best_action
 
-def update_q_learning(state: str, action: str, reward: float,
+def update_q_learning(session_id: str, state: str, action: str, reward: float,
                       next_state: str, alpha=0.1, gamma=0.9):
-    old_value = get_Q_value(state, action)
-    future_qs = [get_Q_value(next_state, a["action"]) for acts in ACTIONS_BY_INTENT.values() for a in acts]
+    q_table = get_q_table(session_id)
+    old_value = get_Q_value(q_table, state, action)
+    # Compute future rewards over all actions from any intent
+    future_qs = [get_Q_value(q_table, next_state, a["action"]) for acts in ACTIONS_BY_INTENT.values() for a in acts]
     best_future_val = max(future_qs) if future_qs else 0.0
     new_value = old_value + alpha * (reward + gamma * best_future_val - old_value)
-    set_Q_value(state, action, new_value)
-    save_q_table_to_mongo()
+    set_Q_value(q_table, state, action, new_value)
+    save_q_table_to_mongo(session_id)
 
 # ----------------------------------------------------------------
 # 5. ENDPOINTS
@@ -167,66 +178,63 @@ def startup_event():
 
 @app.post("/select_action", response_model=SelectActionResponse)
 def select_action(request: SelectActionRequest) -> SelectActionResponse:
-    global last_state, last_action, last_user_id
-    # Directly use user_intent as state
-    state = request.user_intent
-    chosen = choose_action(state, intent=request.user_intent)
+    session_id = request.session_id  # now using session_id instead of user_id
+    state = request.user_intent  # you might choose a more complex state
+    chosen = choose_action(session_id, state, intent=request.user_intent)
     action = chosen["action"]
     bot_response = chosen["bot_response"]
 
-    last_state = state
-    last_action = action
-    last_user_id = request.user_id
-
+    # Save last interaction per session
+    last_interaction_by_session[session_id] = {
+        "state": state,
+        "action": action,
+        "session_id": session_id
+    }
     return SelectActionResponse(action=action, bot_response=bot_response)
 
 @app.post("/update_reward", response_model=UpdateRewardResponse)
 def update_reward(request: UpdateRewardRequest) -> UpdateRewardResponse:
-    global last_state, last_action, last_user_id
-    if last_state is None or last_action is None:
+    session_id = request.session_id
+    session_data = last_interaction_by_session.get(session_id)
+    if not session_data:
         return UpdateRewardResponse(status="No previous state/action to update.")
-
-    # Here we use "feedback" as state when updating reward
+    
+    state = session_data["state"]
+    action = session_data["action"]
     next_state = "feedback"
-    update_q_learning(last_state, last_action, request.reward, next_state)
-
+    update_q_learning(session_id, state, action, request.reward, next_state)
     log_interaction(
-        user_id=last_user_id,
-        state=last_state,
-        action=last_action,
+        session_id=session_id,
+        state=state,
+        action=action,
         reward=request.reward,
         new_state=next_state
     )
-
-    return UpdateRewardResponse(status="Q-table updated.")
+    return UpdateRewardResponse(status="Q-table updated for session: " + session_id)
 
 @app.get("/q_table_debug")
-def get_q_table() -> dict:
-    return {
-        "Q": [
+def get_q_table_debug() -> dict:
+    # Return the Q-table for all sessions.
+    result = {}
+    for sess_id, q_table in Q_by_session.items():
+        result[sess_id] = [
             {
                 "state": key[0],
                 "action": key[1],
                 "value": value
             }
-            for key, value in Q.items()
+            for key, value in q_table.items()
         ]
-    }
+    return {"Q": result}
 
 # NEW: Flowise Interaction Endpoint
 @app.post("/flowise_interaction", response_model=FlowiseInteractionResponse)
 def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractionResponse:
-    global last_state, last_action, last_user_id
+    session_id = request.session_id
 
-    # Update Q-table if applicable (for feedback or followup intents)
-    if (last_state is not None 
-        and last_action is not None
-        and request.feedback_label is not None
-        and (
-            request.user_intent.lower() == "feedback" 
-            or request.user_intent.lower().startswith("followup_")
-        )
-    ):
+    # If this is a feedback or followup, update the Q-table using the previous interaction
+    if (session_id in last_interaction_by_session and request.feedback_label is not None and 
+        (request.user_intent.lower() == "feedback" or request.user_intent.lower().startswith("followup_"))):
         if request.feedback_label.lower() == "positive":
             reward = 1.0
         elif request.feedback_label.lower() == "negative":
@@ -234,30 +242,34 @@ def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractio
         else:
             reward = 0.0
 
+        previous = last_interaction_by_session[session_id]
+        state = previous["state"]
+        action = previous["action"]
         next_state = "feedback"
-        update_q_learning(last_state, last_action, reward, next_state)
+        update_q_learning(session_id, state, action, reward, next_state)
         log_interaction(
-            user_id=last_user_id,
-            state=last_state,
-            action=last_action,
+            session_id=session_id,
+            state=state,
+            action=action,
             reward=reward,
             new_state=next_state
         )
 
-    # Use the provided user_intent directly as the new state
+    # Use the provided user_intent as the new state for this session
     new_state = request.user_intent
-    chosen_action = choose_action(new_state, intent=request.user_intent)
-
-    # Update globals for subsequent interactions
-    last_state = new_state
-    last_action = chosen_action["action"]
-    last_user_id = request.session_id
-
-    # Return only the selected prompt (the bot_response) from the chosen action.
+    chosen_action = choose_action(session_id, new_state, intent=request.user_intent)
+    
+    # Update last interaction for this session
+    last_interaction_by_session[session_id] = {
+        "state": new_state,
+        "action": chosen_action["action"],
+        "session_id": session_id
+    }
+    
     return FlowiseInteractionResponse(
-         status="Action selected.",
+         status="Action selected for session: " + session_id,
          selected_prompt=chosen_action["bot_response"]
-     )    
+     )
 
 # ----------------------------------------------------------------
 # 6. MAIN
