@@ -32,7 +32,7 @@ def load_actions_from_csv(csv_file_path="actions.csv"):
             intent = row["user_intent"]
             action = row["action"]
             persuasive_type = row["persuasive_type"]
-            system_prompt = row["system prompt"]  # Note the space in the CSV header
+            system_prompt = row["system_prompt"]  # Note the space in the CSV header
             if intent not in ACTIONS_BY_INTENT:
                 ACTIONS_BY_INTENT[intent] = []
             ACTIONS_BY_INTENT[intent].append({
