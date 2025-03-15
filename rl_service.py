@@ -158,7 +158,7 @@ def choose_action(state: tuple, intent: str, epsilon=0.1) -> dict:
     # Filter available actions by the current user_intent
     available_actions = ACTIONS_BY_INTENT.get(intent, [])
     if not available_actions:
-        return {"action": "NO_ACTIONS_FOR_INTENT", "bot_response": "No action defined for this intent."}
+        return {"action": "NO_ACTIONS_FOR_INTENT", "bot_response": "Hmm, I'm not sure."}
     
     # Epsilon-greedy: explore with probability epsilon
     if random.random() < epsilon:
