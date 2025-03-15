@@ -254,8 +254,10 @@ def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractio
     last_user_id = request.session_id
 
     # Return only the selected prompt (the bot_response) from the chosen action.
-    return chosen_action["bot_response"]
-    
+    return FlowiseInteractionResponse(
+         status="Action selected.",
+         selected_prompt=chosen_action["bot_response"]
+     )    
 
 # ----------------------------------------------------------------
 # 6. MAIN
