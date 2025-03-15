@@ -142,7 +142,7 @@ def set_Q_value(q_table: dict, state: str, action: str, value: float):
 def choose_action(session_id: str, state: str, intent: str, epsilon=0.1) -> dict:
     available_actions = ACTIONS_BY_INTENT.get(intent, [])
     if not available_actions:
-        return {"action": "NO_ACTIONS_FOR_INTENT", "bot_response": "Hmm, I'm not sure."}
+        return {"action": "NO_ACTIONS_FOR_INTENT", "system_prompt": "Hmm, I'm not sure."}
     q_table = get_q_table(session_id)
     # With probability epsilon, pick a random action (exploration)
     if random.random() < epsilon:
@@ -189,14 +189,14 @@ def select_action(request: SelectActionRequest) -> SelectActionResponse:
     state = request.user_intent
     chosen = choose_action(session_id, state, intent=request.user_intent)
     action = chosen["action"]
-    bot_response = chosen["system_prompt"]  # Updated to use system_prompt
+    system_prompt = chosen["system_prompt"]  # Updated to use system_prompt
 
     last_interaction_by_session[session_id] = {
         "state": state,
         "action": action,
         "session_id": session_id
     }
-    return SelectActionResponse(action=action, bot_response=bot_response)
+    return SelectActionResponse(action=action, system_prompt=system_prompt)
     
 @app.post("/update_reward", response_model=UpdateRewardResponse)
 def update_reward(request: UpdateRewardRequest) -> UpdateRewardResponse:
