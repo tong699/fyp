@@ -31,12 +31,14 @@ def load_actions_from_csv(csv_file_path="actions.csv"):
         for row in reader:
             intent = row["user_intent"]
             action = row["action"]
-            bot_response = row["bot_response"]
+            persuasive_type = row["persuasive_type"]
+            system_prompt = row["system prompt"]  # Note the space in the CSV header
             if intent not in ACTIONS_BY_INTENT:
                 ACTIONS_BY_INTENT[intent] = []
             ACTIONS_BY_INTENT[intent].append({
                 "action": action,
-                "bot_response": bot_response
+                "persuasive_type": persuasive_type,
+                "system_prompt": system_prompt
             })
 
 load_actions_from_csv()  # Call at startup
@@ -98,7 +100,7 @@ class SelectActionRequest(BaseModel):
 
 class SelectActionResponse(BaseModel):
     action: str
-    bot_response: str
+    system_prompt: str
 
 class UpdateRewardRequest(BaseModel):
     session_id: Optional[str] = "unknown"
@@ -184,19 +186,18 @@ def startup_event():
 @app.post("/select_action", response_model=SelectActionResponse)
 def select_action(request: SelectActionRequest) -> SelectActionResponse:
     session_id = request.session_id
-    state = request.user_intent  # state is currently set as user_intent
+    state = request.user_intent
     chosen = choose_action(session_id, state, intent=request.user_intent)
     action = chosen["action"]
-    bot_response = chosen["bot_response"]
+    bot_response = chosen["system_prompt"]  # Updated to use system_prompt
 
-    # Save last interaction per session
     last_interaction_by_session[session_id] = {
         "state": state,
         "action": action,
         "session_id": session_id
     }
     return SelectActionResponse(action=action, bot_response=bot_response)
-
+    
 @app.post("/update_reward", response_model=UpdateRewardResponse)
 def update_reward(request: UpdateRewardRequest) -> UpdateRewardResponse:
     session_id = request.session_id
@@ -272,7 +273,7 @@ def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractio
     
     return FlowiseInteractionResponse(
          status="Action selected for session: " + session_id,
-         selected_prompt=chosen_action["bot_response"]
+         selected_prompt=chosen_action["system_prompt"]
      )
 
 # ----------------------------------------------------------------
