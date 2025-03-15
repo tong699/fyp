@@ -89,7 +89,6 @@ def load_q_table_from_mongo():
 # 3. DATA MODELS
 # ----------------------------------------------------------------
 class SelectActionRequest(BaseModel):
-    # For backward compatibility, you might use user_id as session_id.
     session_id: Optional[str] = "unknown"
     user_intent: str
     last_message: str
@@ -110,7 +109,6 @@ class UpdateRewardRequest(BaseModel):
 class UpdateRewardResponse(BaseModel):
     status: str
 
-# NEW: Simplified Flowise Interaction Request
 class FlowiseInteractionRequest(BaseModel):
     session_id: str
     user_intent: str
@@ -143,6 +141,7 @@ def choose_action(session_id: str, state: str, intent: str, epsilon=0.1) -> dict
     if not available_actions:
         return {"action": "NO_ACTIONS_FOR_INTENT", "bot_response": "Hmm, I'm not sure."}
     q_table = get_q_table(session_id)
+    # With probability epsilon, pick a random action (exploration)
     if random.random() < epsilon:
         return random.choice(available_actions)
     best_action = None
@@ -161,8 +160,13 @@ def update_q_learning(session_id: str, state: str, action: str, reward: float,
                       next_state: str, alpha=0.1, gamma=0.9):
     q_table = get_q_table(session_id)
     old_value = get_Q_value(q_table, state, action)
-    # Compute future rewards over all actions from any intent
-    future_qs = [get_Q_value(q_table, next_state, a["action"]) for acts in ACTIONS_BY_INTENT.values() for a in acts]
+    # Try to get future actions for the next state; if none, iterate over all available actions.
+    actions_for_next_state = ACTIONS_BY_INTENT.get(next_state, [])
+    if actions_for_next_state:
+        future_qs = [get_Q_value(q_table, next_state, a["action"]) for a in actions_for_next_state]
+    else:
+        future_qs = [get_Q_value(q_table, next_state, a["action"])
+                     for acts in ACTIONS_BY_INTENT.values() for a in acts]
     best_future_val = max(future_qs) if future_qs else 0.0
     new_value = old_value + alpha * (reward + gamma * best_future_val - old_value)
     set_Q_value(q_table, state, action, new_value)
@@ -178,8 +182,8 @@ def startup_event():
 
 @app.post("/select_action", response_model=SelectActionResponse)
 def select_action(request: SelectActionRequest) -> SelectActionResponse:
-    session_id = request.session_id  # now using session_id instead of user_id
-    state = request.user_intent  # you might choose a more complex state
+    session_id = request.session_id
+    state = request.user_intent  # state is currently set as user_intent
     chosen = choose_action(session_id, state, intent=request.user_intent)
     action = chosen["action"]
     bot_response = chosen["bot_response"]
@@ -201,6 +205,7 @@ def update_reward(request: UpdateRewardRequest) -> UpdateRewardResponse:
     
     state = session_data["state"]
     action = session_data["action"]
+    # For reward updates, we use a fixed next state "feedback"
     next_state = "feedback"
     update_q_learning(session_id, state, action, request.reward, next_state)
     log_interaction(
@@ -214,7 +219,6 @@ def update_reward(request: UpdateRewardRequest) -> UpdateRewardResponse:
 
 @app.get("/q_table_debug")
 def get_q_table_debug() -> dict:
-    # Return the Q-table for all sessions.
     result = {}
     for sess_id, q_table in Q_by_session.items():
         result[sess_id] = [
@@ -227,12 +231,11 @@ def get_q_table_debug() -> dict:
         ]
     return {"Q": result}
 
-# NEW: Flowise Interaction Endpoint
 @app.post("/flowise_interaction", response_model=FlowiseInteractionResponse)
 def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractionResponse:
     session_id = request.session_id
 
-    # If this is a feedback or followup, update the Q-table using the previous interaction
+    # If feedback is provided (or followup) and there is a previous interaction, update Q-table.
     if (session_id in last_interaction_by_session and request.feedback_label is not None and 
         (request.user_intent.lower() == "feedback" or request.user_intent.lower().startswith("followup_"))):
         if request.feedback_label.lower() == "positive":
@@ -255,7 +258,7 @@ def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractio
             new_state=next_state
         )
 
-    # Use the provided user_intent as the new state for this session
+    # For a new interaction, use the provided user_intent as the new state.
     new_state = request.user_intent
     chosen_action = choose_action(session_id, new_state, intent=request.user_intent)
     
