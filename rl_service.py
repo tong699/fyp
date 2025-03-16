@@ -142,7 +142,7 @@ def set_Q_value(q_table: dict, state: str, action: str, value: float):
 def choose_action(session_id: str, state: str, intent: str, epsilon=0.1) -> dict:
     available_actions = ACTIONS_BY_INTENT.get(intent, [])
     if not available_actions:
-        return {"action": "NO_ACTIONS_FOR_INTENT", "system_prompt": "Hmm, I'm not sure."}
+        return {"action": "NO_ACTIONS_FOR_INTENT", "system_prompt": "Tell user that you do not know."}
     q_table = get_q_table(session_id)
     # With probability epsilon, pick a random action (exploration)
     if random.random() < epsilon:
