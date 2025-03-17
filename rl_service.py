@@ -3,99 +3,99 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from typing import List, Dict, Optional
 import random
-import csv
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+import os
 from datetime import datetime
 from pymongo import MongoClient
+import gridfs
+from collections import deque
 
 app = FastAPI()
 
 # ----------------------------------------------------------------
-# MongoDB Setup
+# MongoDB Setup (GridFS for Model Persistence)
 # ----------------------------------------------------------------
-MONGO_CONNECTION_STRING = "mongodb+srv://cmtong123:20020430@cluster0.d6vff.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+MONGO_CONNECTION_STRING = "your_mongodb_connection_string"
 client = MongoClient(MONGO_CONNECTION_STRING)
 db = client["rl_database"]
 logs_collection = db["action_logs"]
-q_table_collection = db["q_table"]
+fs = gridfs.GridFS(db)  # Initialize GridFS for storing model
+
+MODEL_FILENAME = "dqn_model.pth"
 
 # ----------------------------------------------------------------
-# 1. LOAD PROMPTS FROM CSV
+# DQN Model Definition
 # ----------------------------------------------------------------
-# The CSV should have headers: persuasive_type,system_prompt
-PROMPTS_BY_TONE = {}
+class DQN(nn.Module):
+    def __init__(self, state_size, action_size):
+        super(DQN, self).__init__()
+        self.fc1 = nn.Linear(state_size, 64)
+        self.fc2 = nn.Linear(64, 64)
+        self.fc3 = nn.Linear(64, action_size)
 
-def load_prompts_from_csv(csv_file_path="actions.csv"):
-    global PROMPTS_BY_TONE
-    PROMPTS_BY_TONE.clear()
-    with open(csv_file_path, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            tone = row["persuasive_type"].strip().lower()
-            prompt = row["system_prompt"]
-            PROMPTS_BY_TONE[tone] = prompt
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        return self.fc3(x)
 
-load_prompts_from_csv()  # Call at startup
+# State and action dimensions
+STATE_SIZE = 10  # Placeholder for real state representation
+ACTION_SIZE = 3  # Number of possible persuasive types
 
-# ----------------------------------------------------------------
-# 2. LOGGING TO MONGODB
-# ----------------------------------------------------------------
-def log_interaction(session_id, state, action, reward, new_state):
-    log_entry = {
-        "timestamp": datetime.now().isoformat(),
-        "session_id": session_id,
-        "state": str(state),
-        "action": action,
-        "reward": reward,
-        "new_state": str(new_state)
-    }
-    logs_collection.insert_one(log_entry)
+# Initialize model, optimizer, and memory for experience replay
+model = DQN(STATE_SIZE, ACTION_SIZE)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+memory = deque(maxlen=1000)  # Experience replay buffer
 
 # ----------------------------------------------------------------
-# 2B. Q-TABLE PERSISTENCE FUNCTIONS (per session)
+# Model Persistence (Save/Load from MongoDB GridFS)
 # ----------------------------------------------------------------
-def save_q_table_to_mongo(session_id: str):
-    q_table = Q_by_session.get(session_id, {})
-    q_table_collection.delete_many({"session_id": session_id})
-    docs = []
-    for (state, action), value in q_table.items():
-        docs.append({
-            "session_id": session_id,
-            "state": str(state),
-            "action": action,
-            "value": value
-        })
-    if docs:
-        q_table_collection.insert_many(docs)
+def save_model_to_db():
+    """Save the trained model to MongoDB GridFS."""
+    existing = fs.find_one({"filename": MODEL_FILENAME})
+    if existing:
+        fs.delete(existing._id)  # Remove old model
 
-def load_q_table_from_mongo():
-    global Q_by_session
-    Q_by_session.clear()
-    for doc in q_table_collection.find():
-        session_id = doc.get("session_id", "unknown")
-        state = doc.get("state", "")
-        action = doc.get("action", "")
-        value = doc.get("value", 0.0)
-        if session_id not in Q_by_session:
-            Q_by_session[session_id] = {}
-        Q_by_session[session_id][(state, action)] = value
+    with open(MODEL_FILENAME, "wb") as f:
+        torch.save(model.state_dict(), f)
+
+    with open(MODEL_FILENAME, "rb") as f:
+        file_id = fs.put(f, filename=MODEL_FILENAME)
+        print(f"Model saved to MongoDB with file ID: {file_id}")
+
+def load_model_from_db():
+    """Load the trained model from MongoDB GridFS."""
+    file = fs.find_one({"filename": MODEL_FILENAME})
+    if file:
+        with open(MODEL_FILENAME, "wb") as f:
+            f.write(file.read())  # Write model to disk
+
+        model.load_state_dict(torch.load(MODEL_FILENAME))
+        model.eval()
+        print("Model loaded from MongoDB.")
+    else:
+        print("No model found in MongoDB. Training from scratch.")
 
 # ----------------------------------------------------------------
-# 3. DATA MODELS
+# Data Models
 # ----------------------------------------------------------------
 class SelectActionRequest(BaseModel):
     session_id: Optional[str] = "unknown"
-    user_intent: str  # May be used for logging or state tracking
+    user_intent: str
     last_message: str
     conversation_history: List[str]
     user_profile: Dict[str, str]
-    persuasive_type: Optional[str] = None  # Tone preference: supportive, motivational, or informative
+    persuasive_type: Optional[str] = None
 
 class SelectActionResponse(BaseModel):
     action: str
     system_prompt: str
 
 class UpdateRewardRequest(BaseModel):
-    session_id: Optional[str] = "unknown"
+    session_id: str
     action: str
     reward: float
     feedback_type: str
@@ -107,161 +107,99 @@ class UpdateRewardResponse(BaseModel):
 class FlowiseInteractionRequest(BaseModel):
     session_id: str
     user_intent: str
-    feedback_label: Optional[str] = None  # "positive", "negative", or None
+    feedback_label: Optional[str] = None
 
 class FlowiseInteractionResponse(BaseModel):
     status: str
     selected_prompt: str
 
 # ----------------------------------------------------------------
-# 4. Q-LEARNING LOGIC (per session)
+# Experience Replay and Q-learning Logic
 # ----------------------------------------------------------------
-Q_by_session: Dict[str, Dict] = {}
-last_interaction_by_session: Dict[str, Dict] = {}
+EPSILON = 0.1
+GAMMA = 0.9
+ALPHA = 0.1
+ACTIONS = ["supportive", "motivational", "informative"]  # Action choices
 
-def get_q_table(session_id: str) -> dict:
-    if session_id not in Q_by_session:
-        Q_by_session[session_id] = {}
-    return Q_by_session[session_id]
+def get_state_representation(user_intent: str) -> np.array:
+    """Convert user intent into a numerical state representation."""
+    state_vector = np.random.rand(STATE_SIZE)  # Placeholder: replace with actual features
+    return state_vector
 
-def get_Q_value(q_table: dict, state: str, action: str) -> float:
-    return q_table.get((state, action), 0.0)
-
-def set_Q_value(q_table: dict, state: str, action: str, value: float):
-    q_table[(state, action)] = value
-
-def choose_action(session_id: str, persuasive_type: Optional[str] = None, epsilon=0.1) -> dict:
-    # If a persuasive type is specified and exists, use its corresponding prompt.
-    if persuasive_type:
-        tone = persuasive_type.strip().lower()
-        if tone in PROMPTS_BY_TONE:
-            return {"action": tone, "system_prompt": PROMPTS_BY_TONE[tone]}
-    # Otherwise, select one at random.
-    if PROMPTS_BY_TONE:
-        tone, prompt = random.choice(list(PROMPTS_BY_TONE.items()))
-        return {"action": tone, "system_prompt": prompt}
-    return {"action": "NO_ACTION", "system_prompt": "No persuasive prompts available."}
-
-def update_q_learning(session_id: str, state: str, action: str, reward: float,
-                      next_state: str, alpha=0.1, gamma=0.9):
-    q_table = get_q_table(session_id)
-    old_value = get_Q_value(q_table, state, action)
-    # For tone selection, we consider all available tones as potential future actions.
-    available_actions = list(PROMPTS_BY_TONE.keys())
-    if available_actions:
-        future_qs = [get_Q_value(q_table, next_state, a) for a in available_actions]
-        best_future_val = max(future_qs) if future_qs else 0.0
+def select_action(state):
+    """Selects an action using an epsilon-greedy strategy."""
+    if random.random() < EPSILON:
+        action_index = random.randint(0, ACTION_SIZE - 1)  # Explore
     else:
-        best_future_val = 0.0
-    new_value = old_value + alpha * (reward + gamma * best_future_val - old_value)
-    set_Q_value(q_table, state, action, new_value)
-    save_q_table_to_mongo(session_id)
+        with torch.no_grad():
+            state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
+            action_index = torch.argmax(model(state_tensor)).item()  # Exploit
+    return ACTIONS[action_index]
+
+def replay():
+    """Train the DQN using experience replay."""
+    if len(memory) < 32:
+        return
+    batch = random.sample(memory, 32)
+    states, actions, rewards, next_states = zip(*batch)
+
+    states = torch.tensor(states, dtype=torch.float32)
+    actions = torch.tensor([ACTIONS.index(a) for a in actions], dtype=torch.long)
+    rewards = torch.tensor(rewards, dtype=torch.float32)
+    next_states = torch.tensor(next_states, dtype=torch.float32)
+
+    current_q_values = model(states).gather(1, actions.unsqueeze(1)).squeeze(1)
+    max_next_q_values = model(next_states).max(1)[0].detach()
+    target_q_values = rewards + (GAMMA * max_next_q_values)
+
+    loss = nn.functional.mse_loss(current_q_values, target_q_values)
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
+    if len(memory) % 50 == 0:
+        save_model_to_db()
 
 # ----------------------------------------------------------------
-# 5. ENDPOINTS
+# Endpoints
 # ----------------------------------------------------------------
 @app.on_event("startup")
 def startup_event():
-    load_prompts_from_csv()
-    load_q_table_from_mongo()
+    load_model_from_db()
 
 @app.post("/select_action", response_model=SelectActionResponse)
-def select_action(request: SelectActionRequest) -> SelectActionResponse:
-    session_id = request.session_id
-    persuasive_type = request.persuasive_type  # Tone preference from the client
-    chosen = choose_action(session_id, persuasive_type=persuasive_type)
-    action = chosen["action"]
-    system_prompt = chosen["system_prompt"]
+def select_action_endpoint(request: SelectActionRequest) -> SelectActionResponse:
+    state = get_state_representation(request.user_intent)
+    action = select_action(state)
+    return SelectActionResponse(action=action, system_prompt=f"Generated response in {action} tone.")
 
-    # Log the interaction; here we use the persuasive_type (or "random" if none provided) as the state.
-    last_interaction_by_session[session_id] = {
-        "state": persuasive_type if persuasive_type else "random",
-        "action": action,
-        "session_id": session_id
-    }
-    return SelectActionResponse(action=action, system_prompt=system_prompt)
-    
 @app.post("/update_reward", response_model=UpdateRewardResponse)
-def update_reward(request: UpdateRewardRequest) -> UpdateRewardResponse:
-    session_id = request.session_id
-    session_data = last_interaction_by_session.get(session_id)
-    if not session_data:
-        return UpdateRewardResponse(status="No previous state/action to update.")
-    
-    state = session_data.get("state", "unknown")
-    action = session_data.get("action", "unknown")
-    next_state = "feedback"
-    update_q_learning(session_id, state, action, request.reward, next_state)
-    log_interaction(
-        session_id=session_id,
-        state=state,
-        action=action,
-        reward=request.reward,
-        new_state=next_state
-    )
-    return UpdateRewardResponse(status="Q-table updated for session: " + session_id)
-
-@app.get("/q_table_debug")
-def get_q_table_debug() -> dict:
-    result = {}
-    for sess_id, q_table in Q_by_session.items():
-        result[sess_id] = [
-            {
-                "state": key[0],
-                "action": key[1],
-                "value": value
-            }
-            for key, value in q_table.items()
-        ]
-    return {"Q": result}
+def update_reward_endpoint(request: UpdateRewardRequest) -> UpdateRewardResponse:
+    state = get_state_representation(request.action)  # Get state representation
+    next_state = get_state_representation(request.new_user_message or request.action)
+    memory.append((state, request.action, request.reward, next_state))
+    replay()  # Train the model
+    return UpdateRewardResponse(status="Reward updated successfully.")
 
 @app.post("/flowise_interaction", response_model=FlowiseInteractionResponse)
 def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractionResponse:
-    session_id = request.session_id
+    state = get_state_representation(request.user_intent)
+    action = select_action(state)
 
-    # If feedback is provided, update Q-learning for the previous interaction.
-    if session_id in last_interaction_by_session and request.user_intent in ["positive_feedback", "needs_clarification", "intent_ended"]:
-        if request.user_intent == "positive_feedback":
-            reward = 1.0
-        elif request.user_intent == "needs_clarification":
-            reward = -0.5  # Encourage clarity
-        elif request.feedback_label == "positive":
-            reward = 1.0
-        elif request.feedback_label == "negative":
-            reward = -1.0
-        else:
-            reward = 0.0
+    # Assign rewards based on user feedback
+    reward = 1.0 if request.feedback_label == "positive" else -1.0 if request.feedback_label == "negative" else 0.0
+    next_state = get_state_representation(request.user_intent)
 
-        previous = last_interaction_by_session[session_id]
-        state = previous.get("state", "unknown")
-        action = previous.get("action", "unknown")
-        next_state = "feedback"
-        update_q_learning(session_id, state, action, reward, next_state)
-        log_interaction(
-            session_id=session_id,
-            state=state,
-            action=action,
-            reward=reward,
-            new_state=next_state
-        )
+    memory.append((state, action, reward, next_state))
+    replay()
 
-    # For a new interaction, use the provided user_intent as the state.
-    new_state = request.user_intent
-    chosen_action = choose_action(session_id)
-    
-    last_interaction_by_session[session_id] = {
-        "state": new_state,
-        "action": chosen_action["action"],
-        "session_id": session_id
-    }
-    
     return FlowiseInteractionResponse(
-         status="Action selected for session: " + session_id,
-         selected_prompt=chosen_action["system_prompt"]
-     )
+        status="Action selected successfully",
+        selected_prompt=f"Generated response in {action} tone."
+    )
 
 # ----------------------------------------------------------------
-# 6. MAIN
+# Main Entry Point
 # ----------------------------------------------------------------
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
