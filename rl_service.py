@@ -18,7 +18,7 @@ app = FastAPI()
 # ----------------------------------------------------------------
 # MongoDB Setup (GridFS for Model Persistence)
 # ----------------------------------------------------------------
-MONGO_CONNECTION_STRING = "your_mongodb_connection_string"
+MONGO_CONNECTION_STRING = "mongodb+srv://cmtong123:20020430@cluster0.d6vff.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 client = MongoClient(MONGO_CONNECTION_STRING)
 db = client["rl_database"]
 logs_collection = db["action_logs"]
