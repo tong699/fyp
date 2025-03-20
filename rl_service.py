@@ -1,19 +1,33 @@
 import uvicorn
 from fastapi import FastAPI
 from pydantic import BaseModel
-from typing import List, Dict, Optional
+from typing import Optional
 import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-import os
-from datetime import datetime
 from pymongo import MongoClient
 import gridfs
 from collections import deque
+import csv
 
 app = FastAPI()
+
+# ----------------------------------------------------------------
+# Load CSV Mapping for Actions and Prompts
+# ----------------------------------------------------------------
+# The CSV file (actions.csv) should have two columns:
+# persuasive_type,system_prompt
+ACTIONS_PROMPTS = {}
+try:
+    with open("actions.csv", "r", encoding="utf-8") as csvfile:
+        reader = csv.DictReader(csvfile)
+        for row in reader:
+            key = row["persuasive_type"].strip().lower()
+            ACTIONS_PROMPTS[key] = row["system_prompt"]
+except Exception as e:
+    print("Error loading actions.csv:", e)
 
 # ----------------------------------------------------------------
 # MongoDB Setup (GridFS for Model Persistence)
@@ -21,7 +35,6 @@ app = FastAPI()
 MONGO_CONNECTION_STRING = "mongodb+srv://cmtong123:20020430@cluster0.d6vff.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 client = MongoClient(MONGO_CONNECTION_STRING)
 db = client["rl_database"]
-logs_collection = db["action_logs"]
 fs = gridfs.GridFS(db)  # Initialize GridFS for storing model
 
 MODEL_FILENAME = "dqn_model.pth"
@@ -44,6 +57,9 @@ class DQN(nn.Module):
 # State and action dimensions
 STATE_SIZE = 10  # Placeholder for real state representation
 ACTION_SIZE = 3  # Number of possible persuasive types
+
+# The order here should match the persuasive_type in your CSV if possible.
+ACTIONS = ["supportive", "motivational", "informative"]
 
 # Initialize model, optimizer, and memory for experience replay
 model = DQN(STATE_SIZE, ACTION_SIZE)
@@ -80,30 +96,8 @@ def load_model_from_db():
         print("No model found in MongoDB. Training from scratch.")
 
 # ----------------------------------------------------------------
-# Data Models
+# Data Models for Flowise Interaction
 # ----------------------------------------------------------------
-class SelectActionRequest(BaseModel):
-    session_id: Optional[str] = "unknown"
-    user_intent: str
-    last_message: str
-    conversation_history: List[str]
-    user_profile: Dict[str, str]
-    persuasive_type: Optional[str] = None
-
-class SelectActionResponse(BaseModel):
-    action: str
-    system_prompt: str
-
-class UpdateRewardRequest(BaseModel):
-    session_id: str
-    action: str
-    reward: float
-    feedback_type: str
-    new_user_message: Optional[str] = ""
-
-class UpdateRewardResponse(BaseModel):
-    status: str
-
 class FlowiseInteractionRequest(BaseModel):
     session_id: str
     user_intent: str
@@ -119,7 +113,6 @@ class FlowiseInteractionResponse(BaseModel):
 EPSILON = 0.1
 GAMMA = 0.9
 ALPHA = 0.1
-ACTIONS = ["supportive", "motivational", "informative"]  # Action choices
 
 def get_state_representation(user_intent: str) -> np.array:
     """Convert user intent into a numerical state representation."""
@@ -161,30 +154,25 @@ def replay():
         save_model_to_db()
 
 # ----------------------------------------------------------------
-# Endpoints
+# Endpoints (Only startup_event and flowise_interaction are used)
 # ----------------------------------------------------------------
 @app.on_event("startup")
 def startup_event():
     load_model_from_db()
 
-@app.post("/select_action", response_model=SelectActionResponse)
-def select_action_endpoint(request: SelectActionRequest) -> SelectActionResponse:
-    state = get_state_representation(request.user_intent)
-    action = select_action(state)
-    return SelectActionResponse(action=action, system_prompt=f"Generated response in {action} tone.")
-
-@app.post("/update_reward", response_model=UpdateRewardResponse)
-def update_reward_endpoint(request: UpdateRewardRequest) -> UpdateRewardResponse:
-    state = get_state_representation(request.action)  # Get state representation
-    next_state = get_state_representation(request.new_user_message or request.action)
-    memory.append((state, request.action, request.reward, next_state))
-    replay()  # Train the model
-    return UpdateRewardResponse(status="Reward updated successfully.")
-
 @app.post("/flowise_interaction", response_model=FlowiseInteractionResponse)
 def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractionResponse:
+    # Check if the user_intent is out_of_scope
+    if request.user_intent.lower() == "out_of_scope":
+        return FlowiseInteractionResponse(
+            status="error",
+            selected_prompt="Sorry, I cannot answer your question, please ask a health related question."
+        )
+    
     state = get_state_representation(request.user_intent)
     action = select_action(state)
+    # Get the system prompt from the CSV mapping based on the selected persuasive type
+    selected_prompt = ACTIONS_PROMPTS.get(action.lower(), f"Generated response in {action} tone.")
 
     # Assign rewards based on user feedback
     reward = 1.0 if request.feedback_label == "positive" else -1.0 if request.feedback_label == "negative" else 0.0
@@ -195,7 +183,7 @@ def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractio
 
     return FlowiseInteractionResponse(
         status="Action selected successfully",
-        selected_prompt=f"Generated response in {action} tone."
+        selected_prompt=selected_prompt
     )
 
 # ----------------------------------------------------------------
