@@ -1,193 +1,94 @@
-import uvicorn
-from fastapi import FastAPI
-from pydantic import BaseModel
-from typing import Optional
-import random
-import torch
-import torch.nn as nn
-import torch.optim as optim
+import streamlit as st
 import numpy as np
-from pymongo import MongoClient
-import gridfs
-from collections import deque
-import csv
+import cv2
+import os
+from collections import Counter
 
-app = FastAPI()
+st.set_page_config(page_title="SIFT Banknote Matcher", layout="centered")
+st.title("💵 Multi-Banknote Classifier using SIFT")
 
-# ----------------------------------------------------------------
-# Load CSV Mapping for Actions and Prompts
-# ----------------------------------------------------------------
-# The CSV file (actions.csv) should have two columns:
-# persuasive_type,system_prompt
-ACTIONS_PROMPTS = {}
-try:
-    with open("actions.csv", "r", encoding="utf-8") as csvfile:
-        reader = csv.DictReader(csvfile)
-        for row in reader:
-            key = row["persuasive_type"].strip().lower()
-            ACTIONS_PROMPTS[key] = row["system_prompt"]
-except Exception as e:
-    print("Error loading actions.csv:", e)
+# Match ROI with SIFT against all templates
+def match_sift_roi(roi, templates):
+    gray1 = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+    sift = cv2.SIFT_create()
+    kp1, des1 = sift.detectAndCompute(gray1, None)
 
-# ----------------------------------------------------------------
-# MongoDB Setup (GridFS for Model Persistence)
-# ----------------------------------------------------------------
-MONGO_CONNECTION_STRING = "mongodb+srv://cmtong123:20020430@cluster0.d6vff.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-client = MongoClient(MONGO_CONNECTION_STRING)
-db = client["rl_database"]
-fs = gridfs.GridFS(db)  # Initialize GridFS for storing model
+    best_match = None
+    best_score = 0
 
-MODEL_FILENAME = "dqn_model.pth"
+    for label, template in templates.items():
+        gray2 = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+        kp2, des2 = sift.detectAndCompute(gray2, None)
 
-# ----------------------------------------------------------------
-# DQN Model Definition
-# ----------------------------------------------------------------
-class DQN(nn.Module):
-    def __init__(self, state_size, action_size):
-        super(DQN, self).__init__()
-        self.fc1 = nn.Linear(state_size, 64)
-        self.fc2 = nn.Linear(64, 64)
-        self.fc3 = nn.Linear(64, action_size)
+        if des1 is None or des2 is None:
+            continue
 
-    def forward(self, x):
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        return self.fc3(x)
+        bf = cv2.BFMatcher()
+        matches = bf.knnMatch(des1, des2, k=2)
+        good = [m for m, n in matches if m.distance < 0.75 * n.distance]
 
-# State and action dimensions
-STATE_SIZE = 10  # Placeholder for real state representation
-ACTION_SIZE = 3  # Number of possible persuasive types
+        if len(good) > best_score:
+            best_score = len(good)
+            best_match = label
 
-# The order here should match the persuasive_type in your CSV if possible.
-ACTIONS = ["supportive", "motivational", "informative"]
+    return best_match, best_score
 
-# Initialize model, optimizer, and memory for experience replay
-model = DQN(STATE_SIZE, ACTION_SIZE)
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-memory = deque(maxlen=1000)  # Experience replay buffer
+# Load templates
+TEMPLATE_PATH = "templates"
+templates = {}
+for file in os.listdir(TEMPLATE_PATH):
+    if file.endswith((".jpg", ".jpeg", ".png")):
+        label = os.path.splitext(file)[0]
+        img = cv2.imread(os.path.join(TEMPLATE_PATH, file))
+        if img is not None:
+            templates[label] = img
 
-# ----------------------------------------------------------------
-# Model Persistence (Save/Load from MongoDB GridFS)
-# ----------------------------------------------------------------
-def save_model_to_db():
-    """Save the trained model to MongoDB GridFS."""
-    existing = fs.find_one({"filename": MODEL_FILENAME})
-    if existing:
-        fs.delete(existing._id)  # Remove old model
+# Upload an image
+uploaded_file = st.file_uploader("Upload an image containing banknotes", type=["jpg", "jpeg", "png"])
 
-    with open(MODEL_FILENAME, "wb") as f:
-        torch.save(model.state_dict(), f)
+if uploaded_file is not None:
+    input_img = cv2.imdecode(np.frombuffer(uploaded_file.read(), np.uint8), 1)
 
-    with open(MODEL_FILENAME, "rb") as f:
-        file_id = fs.put(f, filename=MODEL_FILENAME)
-        print(f"Model saved to MongoDB with file ID: {file_id}")
+    st.image(cv2.cvtColor(input_img, cv2.COLOR_BGR2RGB), caption="Uploaded Image", use_column_width=True)
 
-def load_model_from_db():
-    """Load the trained model from MongoDB GridFS."""
-    file = fs.find_one({"filename": MODEL_FILENAME})
-    if file:
-        with open(MODEL_FILENAME, "wb") as f:
-            f.write(file.read())  # Write model to disk
+    # Preprocess image for contour detection
+    gray = cv2.cvtColor(input_img, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    _, thresh = cv2.threshold(blurred, 100, 255, cv2.THRESH_BINARY_INV)
 
-        model.load_state_dict(torch.load(MODEL_FILENAME))
-        model.eval()
-        print("Model loaded from MongoDB.")
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 7))
+    morphed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(morphed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    output_img = input_img.copy()
+    detected_notes = []
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < 1000:
+            continue
+
+        x, y, w, h = cv2.boundingRect(cnt)
+        roi = input_img[y:y+h, x:x+w]
+
+        label, score = match_sift_roi(roi, templates)
+
+        if label:
+            detected_notes.append(label)
+            cv2.rectangle(output_img, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            cv2.putText(output_img, f"${label} ({score})", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6, (255, 0, 0), 2)
+
+    st.subheader("🧾 Results")
+    st.image(cv2.cvtColor(output_img, cv2.COLOR_BGR2RGB), caption="Detected Banknotes", use_column_width=True)
+
+    if detected_notes:
+        note_count = Counter(detected_notes)
+        st.success("Detected Notes:")
+        for note, count in note_count.items():
+            st.markdown(f"- **${note}** × {count}")
     else:
-        print("No model found in MongoDB. Training from scratch.")
-
-# ----------------------------------------------------------------
-# Data Models for Flowise Interaction
-# ----------------------------------------------------------------
-class FlowiseInteractionRequest(BaseModel):
-    session_id: str
-    user_intent: str
-    feedback_label: Optional[str] = None
-
-class FlowiseInteractionResponse(BaseModel):
-    status: str
-    selected_prompt: str
-
-# ----------------------------------------------------------------
-# Experience Replay and Q-learning Logic
-# ----------------------------------------------------------------
-EPSILON = 0.1
-GAMMA = 0.9
-ALPHA = 0.1
-
-def get_state_representation(user_intent: str) -> np.array:
-    """Convert user intent into a numerical state representation."""
-    state_vector = np.random.rand(STATE_SIZE)  # Placeholder: replace with actual features
-    return state_vector
-
-def select_action(state):
-    """Selects an action using an epsilon-greedy strategy."""
-    if random.random() < EPSILON:
-        action_index = random.randint(0, ACTION_SIZE - 1)  # Explore
-    else:
-        with torch.no_grad():
-            state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0)
-            action_index = torch.argmax(model(state_tensor)).item()  # Exploit
-    return ACTIONS[action_index]
-
-def replay():
-    """Train the DQN using experience replay."""
-    if len(memory) < 32:
-        return
-    batch = random.sample(memory, 32)
-    states, actions, rewards, next_states = zip(*batch)
-
-    states = torch.tensor(states, dtype=torch.float32)
-    actions = torch.tensor([ACTIONS.index(a) for a in actions], dtype=torch.long)
-    rewards = torch.tensor(rewards, dtype=torch.float32)
-    next_states = torch.tensor(next_states, dtype=torch.float32)
-
-    current_q_values = model(states).gather(1, actions.unsqueeze(1)).squeeze(1)
-    max_next_q_values = model(next_states).max(1)[0].detach()
-    target_q_values = rewards + (GAMMA * max_next_q_values)
-
-    loss = nn.functional.mse_loss(current_q_values, target_q_values)
-    optimizer.zero_grad()
-    loss.backward()
-    optimizer.step()
-
-    if len(memory) % 50 == 0:
-        save_model_to_db()
-
-# ----------------------------------------------------------------
-# Endpoints (Only startup_event and flowise_interaction are used)
-# ----------------------------------------------------------------
-@app.on_event("startup")
-def startup_event():
-    load_model_from_db()
-
-@app.post("/flowise_interaction", response_model=FlowiseInteractionResponse)
-def flowise_interaction(request: FlowiseInteractionRequest) -> FlowiseInteractionResponse:
-    # Check if the user_intent is out_of_scope
-    if request.user_intent.lower() == "out_of_scope":
-        return FlowiseInteractionResponse(
-            status="error",
-            selected_prompt="Sorry, I cannot answer your question, please ask a health related question."
-        )
-    
-    state = get_state_representation(request.user_intent)
-    action = select_action(state)
-    # Get the system prompt from the CSV mapping based on the selected persuasive type
-    selected_prompt = ACTIONS_PROMPTS.get(action.lower(), f"Generated response in {action} tone.")
-
-    # Assign rewards based on user feedback
-    reward = 1.0 if request.feedback_label == "positive" else -1.0 if request.feedback_label == "negative" else 0.0
-    next_state = get_state_representation(request.user_intent)
-
-    memory.append((state, action, reward, next_state))
-    replay()
-
-    return FlowiseInteractionResponse(
-        status="Action selected successfully",
-        selected_prompt=selected_prompt
-    )
-
-# ----------------------------------------------------------------
-# Main Entry Point
-# ----------------------------------------------------------------
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        st.warning("No recognizable banknotes found.")
+else:
+    st.info("Please upload an image to start.")
